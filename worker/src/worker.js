@@ -3,7 +3,7 @@
  * Fetches current temperature from DMI's API and returns if it's cold
  */
 
-const COPENHAGEN_POINT = "POINT(12.561 55.715)";
+const COPENHAGEN_POINT = "POINT(10.2046907 56.1577354)";
 const KELVIN_TO_CELSIUS = (k) => k - 273.15;
 
 export default {
