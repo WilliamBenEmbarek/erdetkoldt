@@ -1,0 +1,13 @@
+{
+    "name": "temperature-worker",
+    "version": "1.0.0",
+    "description": "Worker for erdetkoldt.dk temperature checking",
+    "main": "src/worker.js",
+    "scripts": {
+      "deploy": "wrangler deploy",
+      "dev": "wrangler dev"
+    },
+    "devDependencies": {
+      "wrangler": "^3.0.0"
+    }
+  }

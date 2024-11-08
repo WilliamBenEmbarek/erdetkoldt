@@ -1,0 +1,13 @@
+name = "temperature-worker"
+main = "src/worker.js"
+compatibility_date = "2024-01-01"
+
+# Production variable bindings
+[vars]
+# The DMI API key will be set through the Cloudflare dashboard
+# DMI_API_KEY = "xxx"
+
+# Route the worker to a custom domain
+[[routes]]
+pattern = "api.erdetkoldt.dk"
+custom_domain = true
