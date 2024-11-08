@@ -49,7 +49,7 @@ export default {
       
       const response = {
         temperature: temperatureCelsius.toFixed(1),
-        isKoldt: temperatureCelsius <= 0,
+        isKoldt: temperatureCelsius <= 10,
         timestamp: new Date().toISOString(),
         updated: data.domain.axes.t.values[0]
       };
