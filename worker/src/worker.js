@@ -10,7 +10,7 @@ export default {
   async fetch(request, env, ctx) {
     // Configure CORS for your domain
     const corsHeaders = {
-      'Access-Control-Allow-Origin': 'https://erdetkoldt.dk',
+      'Access-Control-Allow-Origin': '*', // Since we're on the same domain, we could be more restrictive
       'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
       'Access-Control-Max-Age': '86400',
     };
