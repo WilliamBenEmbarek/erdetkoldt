@@ -11,3 +11,7 @@ compatibility_date = "2024-01-01"
 [[routes]]
 pattern = "erdetkoldt.dk/api/temperature"
 zone_name = "erdetkoldt.dk"
+
+# wrangler.toml (wrangler v3.88.0^)
+[observability.logs]
+enabled = true
