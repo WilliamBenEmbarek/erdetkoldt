@@ -4,6 +4,7 @@
  */
 const COPENHAGEN_POINT = "POINT(12.561 55.715)";
 const KELVIN_TO_CELSIUS = (k) => k - 273.15;
+const CACHE_TTL = 300; // 5 minutes in seconds
 
 // Wind chill calculation for cold weather
 const calculateWindChill = (tempC, windMS) => {
@@ -32,7 +33,22 @@ export default {
     }
 
     try {
-      // Move date calculations inside the request handler
+      // Check cache first
+      const cache = caches.default;
+      const cacheKey = new Request('https://api.erdetkoldt.dk/temperature-wind', request);
+      let response = await cache.match(cacheKey);
+
+      if (response) {
+        // Return cached response with CORS headers
+        return new Response(response.body, {
+          headers: {
+            ...response.headers,
+            ...corsHeaders
+          }
+        });
+      }
+
+      // If not in cache, calculate time window and fetch from DMI
       const timeWindow = (() => {
         const now = new Date();
         const oneHourAhead = new Date(now.getTime() + 60 * 60 * 1000);
@@ -74,7 +90,7 @@ export default {
       // Consider it cold if it feels like 5°C or below
       const isKoldt = feelsLike <= 5;
       
-      const response = {
+      const responseData = {
         temperature: actualTemp.toFixed(1),
         feelsLike: feelsLike.toFixed(1),
         isKoldt: isKoldt,
@@ -82,14 +98,19 @@ export default {
         windSpeed: windSpeed.toFixed(1)
       };
 
+      // Create response with headers
       const headers = {
         'Content-Type': 'application/json',
-        'Cache-Control': 'public, max-age=300',
+        'Cache-Control': `public, max-age=${CACHE_TTL}`,
         ...corsHeaders
       };
 
-      return new Response(JSON.stringify(response), { headers });
+      response = new Response(JSON.stringify(responseData), { headers });
 
+      // Store in cache
+      ctx.waitUntil(cache.put(cacheKey, response.clone()));
+
+      return response;
     } catch (error) {
       console.error('Error:', error);
       
