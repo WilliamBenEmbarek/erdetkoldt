@@ -4,7 +4,16 @@
  */
 const COPENHAGEN_POINT = "POINT(12.561 55.715)";
 const KELVIN_TO_CELSIUS = (k) => k - 273.15;
-const CACHE_TTL = 300; // 5 minutes in seconds
+const FRESH_TTL = 300; // serve without refreshing for 5 minutes
+const STALE_TTL = 7200; // keep in edge cache as fallback for 2 hours
+const BROWSER_TTL = 60; // browser cache
+const CACHE_URL = 'https://api.erdetkoldt.dk/temperature-wind';
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
+  'Access-Control-Max-Age': '86400',
+};
 
 // Wind chill calculation for cold weather
 const calculateWindChill = (tempC, windMS) => {
@@ -18,102 +27,99 @@ const formatDateForAPI = (date) => {
   return date.toISOString().split('.')[0] + '.000Z';
 };
 
+// The open API has no auth but is quick to answer 429, so retry briefly
+async function fetchFromDMI() {
+  const now = new Date();
+  const oneHourAhead = new Date(now.getTime() + 60 * 60 * 1000);
+
+  const apiUrl = new URL('https://opendataapi.dmi.dk/v1/forecastedr/collections/harmonie_dini_sf/position');
+  apiUrl.searchParams.set('coords', COPENHAGEN_POINT);
+  apiUrl.searchParams.set('crs', 'crs84');
+  apiUrl.searchParams.set('parameter-name', 'temperature-2m,wind-speed');
+  apiUrl.searchParams.set('datetime', `${formatDateForAPI(now)}/${formatDateForAPI(oneHourAhead)}`);
+
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const dmiResponse = await fetch(apiUrl.toString(), {
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(10000)
+      });
+      if (dmiResponse.ok) return dmiResponse.json();
+      lastError = new Error(`DMI API responded with ${dmiResponse.status}`);
+      if (dmiResponse.status !== 429) break;
+    } catch (err) {
+      lastError = err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+  }
+  throw lastError;
+}
+
+function buildPayload(data) {
+  const temperatureKelvin = data.ranges['temperature-2m'].values[0];
+  const windSpeed = data.ranges['wind-speed']?.values[0] || 0;
+
+  const actualTemp = KELVIN_TO_CELSIUS(temperatureKelvin);
+  const feelsLike = calculateWindChill(actualTemp, windSpeed);
+
+  return {
+    temperature: actualTemp.toFixed(1),
+    feelsLike: feelsLike.toFixed(1),
+    isKoldt: feelsLike <= 5,
+    timestamp: data.domain.axes.t.values[0],
+    windSpeed: windSpeed.toFixed(1)
+  };
+}
+
+async function refreshCache(cache) {
+  const data = await fetchFromDMI();
+  const payload = buildPayload(data);
+
+  const stored = new Response(JSON.stringify(payload), {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': `public, max-age=${STALE_TTL}`,
+      'X-Fetched-At': String(Date.now())
+    }
+  });
+  await cache.put(new Request(CACHE_URL), stored.clone());
+  return stored;
+}
+
+function serve(response) {
+  const headers = new Headers(response.headers);
+  headers.set('Cache-Control', `public, max-age=${BROWSER_TTL}`);
+  headers.delete('X-Fetched-At');
+  for (const [key, value] of Object.entries(CORS_HEADERS)) {
+    headers.set(key, value);
+  }
+  return new Response(response.body, { headers });
+}
+
 export default {
   async fetch(request, env, ctx) {
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
-      'Access-Control-Max-Age': '86400',
-    };
-
     if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: corsHeaders
-      });
+      return new Response(null, { headers: CORS_HEADERS });
+    }
+
+    const cache = caches.default;
+    const cached = await cache.match(new Request(CACHE_URL));
+
+    if (cached) {
+      // Serve instantly; refresh in the background if past the fresh window
+      const fetchedAt = Number(cached.headers.get('X-Fetched-At')) || 0;
+      if (Date.now() - fetchedAt > FRESH_TTL * 1000) {
+        ctx.waitUntil(refreshCache(cache).catch((err) => console.error('Background refresh failed:', err)));
+      }
+      return serve(cached);
     }
 
     try {
-      // Check cache first
-      const cache = caches.default;
-      const cacheKey = new Request('https://api.erdetkoldt.dk/temperature-wind', request);
-      let response = await cache.match(cacheKey);
-
-      if (response) {
-        // Return cached response with CORS headers
-        return new Response(response.body, {
-          headers: {
-            ...response.headers,
-            ...corsHeaders
-          }
-        });
-      }
-
-      // If not in cache, calculate time window and fetch from DMI
-      const timeWindow = (() => {
-        const now = new Date();
-        const oneHourAhead = new Date(now.getTime() + 60 * 60 * 1000);
-        return {
-          start: formatDateForAPI(now),
-          end: formatDateForAPI(oneHourAhead)
-        };
-      })();
-      
-      // Construct the DMI API URL
-      const apiUrl = new URL('https://dmigw.govcloud.dk/v1/forecastedr/collections/harmonie_dini_sf/position');
-      apiUrl.searchParams.set('coords', COPENHAGEN_POINT);
-      apiUrl.searchParams.set('crs', 'crs84');
-      apiUrl.searchParams.set('parameter-name', 'temperature-2m,wind-speed');
-      apiUrl.searchParams.set('datetime', `${timeWindow.start}/${timeWindow.end}`);
-      
-      // Make the API request
-      const dmiResponse = await fetch(apiUrl.toString(), {
-        headers: {
-          'Accept': 'application/json',
-          'X-Gravitee-Api-Key': env.DMI_API_KEY
-        }
-      });
-
-      if (!dmiResponse.ok) {
-        throw new Error(`DMI API responded with ${dmiResponse.status}`);
-      }
-
-      const data = await dmiResponse.json();
-      
-      // Get the latest values
-      const temperatureKelvin = data.ranges['temperature-2m'].values[0];
-      const windSpeed = data.ranges['wind-speed']?.values[0] || 0;
-      
-      // Convert and calculate feels like temperature
-      const actualTemp = KELVIN_TO_CELSIUS(temperatureKelvin);
-      const feelsLike = calculateWindChill(actualTemp, windSpeed);
-      
-      // Consider it cold if it feels like 5°C or below
-      const isKoldt = feelsLike <= 5;
-      
-      const responseData = {
-        temperature: actualTemp.toFixed(1),
-        feelsLike: feelsLike.toFixed(1),
-        isKoldt: isKoldt,
-        timestamp: data.domain.axes.t.values[0],
-        windSpeed: windSpeed.toFixed(1)
-      };
-
-      // Create response with headers
-      const headers = {
-        'Content-Type': 'application/json',
-        'Cache-Control': `public, max-age=${CACHE_TTL}`,
-        ...corsHeaders
-      };
-
-      response = new Response(JSON.stringify(responseData), { headers });
-
-      // Store in cache
-      ctx.waitUntil(cache.put(cacheKey, response.clone()));
-
-      return response;
+      return serve(await refreshCache(cache));
     } catch (error) {
       console.error('Error:', error);
-      
+
       return new Response(JSON.stringify({
         error: 'Kunne ikke hente temperatur data',
         detail: error.message
@@ -121,7 +127,7 @@ export default {
         status: 500,
         headers: {
           'Content-Type': 'application/json',
-          ...corsHeaders
+          ...CORS_HEADERS
         }
       });
     }
